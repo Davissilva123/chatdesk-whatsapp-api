@@ -240,8 +240,9 @@ export async function handleIncomingMessage(msg, sessionId, inboxId, sock) {
 
     // 1. Encontrar ou criar contato no Supabase
     logDebug(`[${sessionId}] Chamando findOrCreateContact para phone=${phone}`);
-    // companyId não está no escopo, precisamos buscar da inbox ou passar nulo por enquanto
-    const contact = await findOrCreateContact({ phone, name, companyId: null });
+    // Extract companyId from inbox to satisfy SaaS schema constraints
+    const companyId = inboxObj?.company_id || null;
+    const contact = await findOrCreateContact({ phone, name, companyId });
     logDebug(`[${sessionId}] Contato obtido: id=${contact.id}`);
 
     // Buscar avatar caso não exista (de forma assíncrona para não travar a mensagem)
@@ -270,7 +271,8 @@ export async function handleIncomingMessage(msg, sessionId, inboxId, sock) {
       contactId: contact.id,
       inboxId,
       sessionId,
-      isOutgoing
+      isOutgoing,
+      companyId
     });
     logDebug(`[${sessionId}] Conversa obtida: id=${conversation.id}, isNew=${isNew}`);
 
@@ -287,7 +289,8 @@ export async function handleIncomingMessage(msg, sessionId, inboxId, sock) {
       mediaMimeType,
       mediaFilename,
       waMessageId,
-      createdAt: timestamp
+      createdAt: timestamp,
+      companyId
     });
     logDebug(`[${sessionId}] Mensagem inserida: id=${insertedMessage.id}`);
 
