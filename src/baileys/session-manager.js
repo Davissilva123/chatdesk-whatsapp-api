@@ -164,6 +164,7 @@ export async function startSession(sessionId, inboxId) {
 
   // Receber mensagens
   sock.ev.on('messages.upsert', async ({ messages: msgs, type }) => {
+    console.log(`[${sessionId}] messages.upsert EVENT FIRED! type: ${type}, msgs: ${msgs.length}`);
     if (type !== 'notify') return;
     for (const msg of msgs) {
       await handleIncomingMessage(msg, sessionId, inboxId, sock);
