@@ -57,6 +57,8 @@ router.post('/send', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Tipo de mensagem não suportado.', code: 'BAD_REQUEST' });
     }
 
+    let extraOptions = {};
+
     // Se tiver resposta (quote)
     if (replyToMessageId) {
       try {
@@ -67,7 +69,7 @@ router.post('/send', async (req, res) => {
           .single();
 
         if (quotedMsg && quotedMsg.wa_message_id) {
-          sendOptions.quoted = {
+          extraOptions.quoted = {
             key: {
               remoteJid: jid,
               fromMe: quotedMsg.sender_type === 'agent',
@@ -111,8 +113,8 @@ router.post('/send', async (req, res) => {
         });
     }
 
-    // Enviar mensagem informando o ID gerado nas opções
-    const result = await sock.sendMessage(jid, sendOptions, { messageId: waMessageId });
+    // Enviar mensagem informando o ID gerado nas opções e a citação se houver
+    const result = await sock.sendMessage(jid, sendOptions, { messageId: waMessageId, ...extraOptions });
 
     res.json({
       success: true,
