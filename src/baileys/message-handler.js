@@ -14,12 +14,13 @@ import path from 'path';
 import crypto from 'crypto';
 
 function logDebug(message) {
+  const logPath = path.join(process.cwd(), 'debug.log');
+  const timestamp = new Date().toISOString();
   try {
-    const logPath = path.join(process.cwd(), 'debug.log');
-    const timestamp = new Date().toISOString();
+    console.log(`[DEBUG] ${message}`);
     fs.appendFileSync(logPath, `[${timestamp}] ${message}\n`);
-  } catch (e) {
-    console.error('Failed to write debug log:', e);
+  } catch (err) {
+    // ignorar erros de log
   }
 }
 
