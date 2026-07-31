@@ -6,7 +6,7 @@ import crypto from 'crypto';
 const router = express.Router();
 
 router.post('/send', async (req, res) => {
-  const { sessionId, phone, type, content, mediaUrl, conversationId, messageId } = req.body;
+  const { sessionId, phone, type, content, mediaUrl, conversationId, messageId, replyToMessageId } = req.body;
 
   if (!sessionId || !phone || !type) {
     return res.status(400).json({
@@ -57,6 +57,32 @@ router.post('/send', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Tipo de mensagem não suportado.', code: 'BAD_REQUEST' });
     }
 
+    // Se tiver resposta (quote)
+    if (replyToMessageId) {
+      try {
+        const { data: quotedMsg } = await supabase
+          .from('messages')
+          .select('wa_message_id, sender_type, content')
+          .eq('id', replyToMessageId)
+          .single();
+
+        if (quotedMsg && quotedMsg.wa_message_id) {
+          sendOptions.quoted = {
+            key: {
+              remoteJid: jid,
+              fromMe: quotedMsg.sender_type === 'agent',
+              id: quotedMsg.wa_message_id
+            },
+            message: {
+              conversation: quotedMsg.content || ''
+            }
+          };
+        }
+      } catch (err) {
+        console.error('Erro ao buscar mensagem citada:', err);
+      }
+    }
+
     // Gerar waMessageId previamente para salvar antes de enviar
     const waMessageId = '3EB0' + crypto.randomBytes(8).toString('hex').toUpperCase();
 
@@ -80,7 +106,8 @@ router.post('/send', async (req, res) => {
           message_type: type,
           media_url: mediaUrl || null,
           wa_message_id: waMessageId,
-          status: 'delivered'
+          status: 'delivered',
+          reply_to_message_id: replyToMessageId || null
         });
     }
 
@@ -100,6 +127,122 @@ router.post('/send', async (req, res) => {
       error: `Erro interno ao processar envio: ${error.message || error}`,
       code: 'INTERNAL_ERROR'
     });
+  }
+});
+
+// ==========================================
+// DELETAR MENSAGEM (APAGAR PARA TODOS)
+// ==========================================
+router.post('/send/delete', async (req, res) => {
+  const { sessionId, phone, waMessageId, deleteForEveryone, messageId } = req.body;
+  if (!sessionId || !phone || !waMessageId) return res.status(400).json({ success: false, error: 'Parâmetros inválidos' });
+
+  const session = getSession(sessionId);
+  if (!session || session.status !== 'connected') return res.status(400).json({ success: false, error: 'Sessão desconectada' });
+
+  try {
+    let jid = phone;
+    if (!jid.includes('@')) jid = `${phone.replace(/\D/g, '')}@s.whatsapp.net`;
+    
+    // Se for apagar para todos, chama API do WhatsApp
+    if (deleteForEveryone) {
+      await session.sock.sendMessage(jid, { delete: { remoteJid: jid, fromMe: true, id: waMessageId } });
+    }
+    
+    // Atualizar no banco
+    if (messageId) {
+      await supabase.from('messages').update({ 
+        is_deleted: true, 
+        deleted_for_everyone: deleteForEveryone 
+      }).eq('id', messageId);
+    } else {
+      await supabase.from('messages').update({ 
+        is_deleted: true, 
+        deleted_for_everyone: deleteForEveryone 
+      }).eq('wa_message_id', waMessageId);
+    }
+    
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ==========================================
+// EDITAR MENSAGEM
+// ==========================================
+router.post('/send/edit', async (req, res) => {
+  const { sessionId, phone, waMessageId, newContent, messageId } = req.body;
+  if (!sessionId || !phone || !waMessageId || !newContent) return res.status(400).json({ success: false, error: 'Parâmetros inválidos' });
+
+  const session = getSession(sessionId);
+  if (!session || session.status !== 'connected') return res.status(400).json({ success: false, error: 'Sessão desconectada' });
+
+  try {
+    let jid = phone;
+    if (!jid.includes('@')) jid = `${phone.replace(/\D/g, '')}@s.whatsapp.net`;
+    
+    await session.sock.sendMessage(jid, { 
+      edit: { remoteJid: jid, fromMe: true, id: waMessageId }, 
+      text: newContent 
+    });
+    
+    // Atualizar banco
+    const updatePayload = { content: newContent, edited_at: new Date().toISOString() };
+    if (messageId) {
+      await supabase.from('messages').update(updatePayload).eq('id', messageId);
+    } else {
+      await supabase.from('messages').update(updatePayload).eq('wa_message_id', waMessageId);
+    }
+    
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ==========================================
+// REAGIR A MENSAGEM
+// ==========================================
+router.post('/send/react', async (req, res) => {
+  const { sessionId, phone, waMessageId, reaction, fromMe, messageId } = req.body;
+  if (!sessionId || !phone || !waMessageId) return res.status(400).json({ success: false, error: 'Parâmetros inválidos' });
+
+  const session = getSession(sessionId);
+  if (!session || session.status !== 'connected') return res.status(400).json({ success: false, error: 'Sessão desconectada' });
+
+  try {
+    let jid = phone;
+    if (!jid.includes('@')) jid = `${phone.replace(/\D/g, '')}@s.whatsapp.net`;
+    
+    await session.sock.sendMessage(jid, { 
+      react: { 
+        text: reaction || '', 
+        key: { remoteJid: jid, fromMe: !!fromMe, id: waMessageId } 
+      } 
+    });
+    
+    // Se temos messageId, precisamos atualizar as reações locais no DB
+    if (messageId) {
+      const { data: msgToReact } = await supabase.from('messages').select('reactions').eq('id', messageId).single();
+      if (msgToReact) {
+        let currentReactions = msgToReact.reactions;
+        if (!Array.isArray(currentReactions)) currentReactions = [];
+        
+        // Remove reação anterior do agente
+        currentReactions = currentReactions.filter(r => r.sender !== 'agent');
+        
+        if (reaction && reaction !== '') {
+          currentReactions.push({ emoji: reaction, sender: 'agent' });
+        }
+        
+        await supabase.from('messages').update({ reactions: currentReactions }).eq('id', messageId);
+      }
+    }
+    
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 

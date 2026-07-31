@@ -217,14 +217,28 @@ export async function startSession(sessionId, inboxId) {
             const phone = contact.id.split('@')[0];
             if (phone.length > 8 && !phone.includes('g.us')) {
               let url = null;
+              let finalUrl = null;
               try {
                 // Tenta buscar a foto. O await garante que não faremos centenas de requisições paralelas.
                 url = await sock.profilePictureUrl(contact.id, 'image');
+                if (url) {
+                  try {
+                    const { uploadMediaToStorage } = await import('../services/media.js');
+                    const response = await fetch(url);
+                    if (response.ok) {
+                      const arrayBuffer = await response.arrayBuffer();
+                      const buffer = Buffer.from(arrayBuffer);
+                      finalUrl = await uploadMediaToStorage(buffer, 'image/jpeg', `avatar_${phone}.jpg`);
+                    }
+                  } catch (e) {
+                    finalUrl = url; // fallback
+                  }
+                }
               } catch (e) {
                 // Ignorar (contato sem foto ou restrição de privacidade)
               }
 
-              await findOrCreateContact({ phone, name: contact.name, avatar_url: url }).catch(e => {
+              await findOrCreateContact({ phone, name: contact.name, avatar_url: finalUrl || url }).catch(e => {
                 console.error(`[${sessionId}] Falha ao salvar contato ${phone}:`, e.message);
               });
 

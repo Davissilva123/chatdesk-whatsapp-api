@@ -65,6 +65,9 @@ export async function handleIncomingMessage(msg, sessionId, inboxId, sock) {
       message = message.viewOnceMessageV2.message;
     } else if (message.documentWithCaptionMessage) {
       message = message.documentWithCaptionMessage.message;
+    } else if (message.editedMessage) {
+      // Baileys às vezes envelopa edições de forma diferente. Vamos interceptar mais abaixo se for protocolMessage.
+      break;
     } else {
       break;
     }
@@ -99,6 +102,73 @@ export async function handleIncomingMessage(msg, sessionId, inboxId, sock) {
     if (!jid) {
       logDebug(`[${sessionId}] Ignorado: remoteJid está vazio.`);
       return;
+    }
+
+    // --- MANIPULAÇÃO DE EXCLUSÃO (REVOKE) E EDIÇÃO (MESSAGE_EDIT) ---
+    if (message?.protocolMessage) {
+      const pMsg = message.protocolMessage;
+      // REVOKE = 0 ou 'REVOKE'
+      if ((pMsg.type === 0 || pMsg.type === 'REVOKE') && pMsg.key) {
+        logDebug(`[${sessionId}] Recebido REVOKE para a mensagem ${pMsg.key.id}`);
+        await supabase
+          .from('messages')
+          .update({ is_deleted: true, deleted_for_everyone: true })
+          .eq('wa_message_id', pMsg.key.id);
+        return;
+      }
+      
+      // MESSAGE_EDIT = 14 ou 'MESSAGE_EDIT'
+      if ((pMsg.type === 14 || pMsg.type === 'MESSAGE_EDIT') && pMsg.key && pMsg.editedMessage) {
+        logDebug(`[${sessionId}] Recebido EDIT para a mensagem ${pMsg.key.id}`);
+        let editedContent = null;
+        const eMsg = pMsg.editedMessage;
+        if (eMsg.conversation) editedContent = eMsg.conversation;
+        else if (eMsg.extendedTextMessage?.text) editedContent = eMsg.extendedTextMessage.text;
+        
+        if (editedContent) {
+          await supabase
+            .from('messages')
+            .update({ content: editedContent, edited_at: new Date().toISOString() })
+            .eq('wa_message_id', pMsg.key.id);
+        }
+        return;
+      }
+    }
+
+    // --- MANIPULAÇÃO DE REAÇÕES ---
+    if (message?.reactionMessage) {
+      const rMsg = message.reactionMessage;
+      if (rMsg.key) {
+        const reactionText = rMsg.text || ''; // vazio significa reação removida
+        logDebug(`[${sessionId}] Recebida reação '${reactionText}' para a mensagem ${rMsg.key.id}`);
+        
+        const { data: msgToReact } = await supabase
+          .from('messages')
+          .select('id, reactions')
+          .eq('wa_message_id', rMsg.key.id)
+          .maybeSingle();
+          
+        if (msgToReact) {
+          let currentReactions = msgToReact.reactions;
+          if (!Array.isArray(currentReactions)) currentReactions = [];
+          
+          const reactionSender = msg.key.participant || msg.key.remoteJid;
+          
+          // Remove reação anterior deste sender
+          currentReactions = currentReactions.filter(r => r.sender !== reactionSender);
+          
+          // Adiciona nova reação se não for remoção
+          if (reactionText !== '') {
+            currentReactions.push({ emoji: reactionText, sender: reactionSender });
+          }
+          
+          await supabase
+            .from('messages')
+            .update({ reactions: currentReactions })
+            .eq('id', msgToReact.id);
+        }
+        return;
+      }
     }
 
     // Buscar configurações da inbox no Supabase para saber se devemos ignorar audios ou grupos
@@ -250,8 +320,21 @@ export async function handleIncomingMessage(msg, sessionId, inboxId, sock) {
       sock.profilePictureUrl(key.remoteJid, 'image')
         .then(async (url) => {
           if (url) {
-            await supabase.from('contacts').update({ avatar_url: url }).eq('id', contact.id);
-            logDebug(`[${sessionId}] Foto de perfil atualizada para ${phone}`);
+            try {
+              // Fazer o download da imagem e subir pro nosso storage
+              const response = await fetch(url);
+              if (response.ok) {
+                const arrayBuffer = await response.arrayBuffer();
+                const buffer = Buffer.from(arrayBuffer);
+                const publicUrl = await uploadMediaToStorage(buffer, 'image/jpeg', `avatar_${contact.id}.jpg`);
+                await supabase.from('contacts').update({ avatar_url: publicUrl }).eq('id', contact.id);
+                logDebug(`[${sessionId}] Foto de perfil atualizada e salva no storage para ${phone}`);
+              }
+            } catch (dlErr) {
+              logDebug(`[${sessionId}] Erro ao processar foto de perfil: ${dlErr.message}`);
+              // Fallback para url temporária
+              await supabase.from('contacts').update({ avatar_url: url }).eq('id', contact.id);
+            }
           }
         })
         .catch(() => {
