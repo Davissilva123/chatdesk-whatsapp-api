@@ -34,12 +34,13 @@ async function withLock(key, fn) {
 export async function findOrCreateContact({ phone, name, avatar_url, companyId }) {
   return await withLock(`contact-${companyId}-${phone}`, async () => {
     // Tenta encontrar por telefone e empresa
-    const { data: existing, error: selectError } = await supabase
-      .from('contacts')
-      .select('*')
-      .eq('company_id', companyId)
-      .eq('phone', phone)
-      .maybeSingle();
+    let query = supabase.from('contacts').select('*').eq('phone', phone);
+    if (companyId) {
+      query = query.eq('company_id', companyId);
+    } else {
+      query = query.is('company_id', null);
+    }
+    const { data: existing, error: selectError } = await query.maybeSingle();
 
     if (existing) {
       if (avatar_url && !existing.avatar_url) {
@@ -67,12 +68,20 @@ export async function findOrCreateContact({ phone, name, avatar_url, companyId }
 export async function findOrCreateConversation({ contactId, inboxId, sessionId, isOutgoing = false, companyId }) {
   return await withLock(`conv-${contactId}-${inboxId}`, async () => {
     // Verifica se existe conversa aberta
-    const { data: existing, error: selectError } = await supabase
+    let query = supabase
       .from('conversations')
       .select('*')
       .eq('contact_id', contactId)
       .eq('inbox_id', inboxId)
-      .eq('status', 'open')
+      .eq('status', 'open');
+      
+    if (companyId) {
+      query = query.eq('company_id', companyId);
+    } else {
+      query = query.is('company_id', null);
+    }
+    
+    const { data: existing, error: selectError } = await query
       .order('created_at', { ascending: false })
       .limit(1)
       .maybeSingle();
